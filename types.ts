@@ -1,3 +1,4 @@
+
 export interface DataRow {
   [key: string]: string | number | boolean | null;
 }
@@ -43,6 +44,7 @@ export interface Project {
   subPlan: string;
   actPlan: string;
   activity: string;
+  duration?: string; // Added duration field
 }
 
 export interface Transaction {

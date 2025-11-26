@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   LayoutDashboard, 
@@ -146,6 +147,7 @@ const App: React.FC = () => {
         subPlan: newProject.subPlan || '',
         actPlan: newProject.actPlan || '',
         activity: newProject.activity || '',
+        duration: newProject.duration || '',
       };
 
       setProjects([...projects, project]);
@@ -269,7 +271,7 @@ const App: React.FC = () => {
       return matchesCategory && matchesSearch;
     });
 
-    const csvHeader = ['ชื่อโครงการ', 'กอง/กลุ่ม/ภารกิจ', 'ประเภทงบ', 'งบจัดสรร', 'ใช้ไปแล้ว', 'คงเหลือ'];
+    const csvHeader = ['ชื่อโครงการ', 'กอง/กลุ่ม/ภารกิจ', 'ประเภทงบ', 'งบจัดสรร', 'ใช้ไปแล้ว', 'คงเหลือ', 'วันที่เริ่ม-สิ้นสุด'];
     const csvRows = filteredProjects.map(p => {
       const stats = getProjectStats(p.name);
       return [
@@ -278,7 +280,8 @@ const App: React.FC = () => {
         `"${p.budgetType}"`,
         p.budget,
         stats?.used || 0,
-        stats?.remaining || 0
+        stats?.remaining || 0,
+        `"${p.duration?.replace(/"/g, '""') || ''}"`
       ].join(',');
     });
 
@@ -535,6 +538,11 @@ const App: React.FC = () => {
                     <InputField 
                       label="9. กิจกรรม" 
                       value={newProject.activity || ''} onChange={e => setNewProject({...newProject, activity: e.target.value})} />
+                    
+                     <InputField 
+                      label="10. วันที่เริ่ม-สิ้นสุด" 
+                      placeholder="วว/ดด/ปปปป - วว/ดด/ปปปป"
+                      value={newProject.duration || ''} onChange={e => setNewProject({...newProject, duration: e.target.value})} />
                   </div>
 
                   <div className="col-span-1 md:col-span-2 pt-6 flex gap-4 border-t border-slate-50 mt-2">
