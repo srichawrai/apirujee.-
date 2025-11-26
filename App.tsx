@@ -147,7 +147,6 @@ const App: React.FC = () => {
         subPlan: newProject.subPlan || '',
         actPlan: newProject.actPlan || '',
         activity: newProject.activity || '',
-        duration: newProject.duration || '',
       };
 
       setProjects([...projects, project]);
@@ -271,7 +270,7 @@ const App: React.FC = () => {
       return matchesCategory && matchesSearch;
     });
 
-    const csvHeader = ['ชื่อโครงการ', 'กอง/กลุ่ม/ภารกิจ', 'ประเภทงบ', 'งบจัดสรร', 'ใช้ไปแล้ว', 'คงเหลือ', 'วันที่เริ่ม-สิ้นสุด'];
+    const csvHeader = ['ชื่อโครงการ', 'กอง/กลุ่ม/ภารกิจ', 'ประเภทงบ', 'งบจัดสรร', 'ใช้ไปแล้ว', 'คงเหลือ'];
     const csvRows = filteredProjects.map(p => {
       const stats = getProjectStats(p.name);
       return [
@@ -280,8 +279,7 @@ const App: React.FC = () => {
         `"${p.budgetType}"`,
         p.budget,
         stats?.used || 0,
-        stats?.remaining || 0,
-        `"${p.duration?.replace(/"/g, '""') || ''}"`
+        stats?.remaining || 0
       ].join(',');
     });
 
@@ -538,11 +536,6 @@ const App: React.FC = () => {
                     <InputField 
                       label="9. กิจกรรม" 
                       value={newProject.activity || ''} onChange={e => setNewProject({...newProject, activity: e.target.value})} />
-                    
-                     <InputField 
-                      label="10. วันที่เริ่ม-สิ้นสุด" 
-                      placeholder="วว/ดด/ปปปป - วว/ดด/ปปปป"
-                      value={newProject.duration || ''} onChange={e => setNewProject({...newProject, duration: e.target.value})} />
                   </div>
 
                   <div className="col-span-1 md:col-span-2 pt-6 flex gap-4 border-t border-slate-50 mt-2">
@@ -900,7 +893,15 @@ const App: React.FC = () => {
                           {/* Transaction History (Mini) */}
                           <div className="bg-white rounded-2xl shadow-[0_2px_15px_-3px_rgba(0,0,0,0.07),0_10px_20px_-2px_rgba(0,0,0,0.04)] border border-slate-100 overflow-hidden flex flex-col h-[600px]">
                               <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-                                 <h3 className="font-bold text-slate-800">ประวัติล่าสุด</h3>
+                                 <div>
+                                    <h3 className="font-bold text-slate-800">ประวัติล่าสุด</h3>
+                                    {(() => {
+                                        const project = projects.find(p => p.name === selectedProjectName);
+                                        return project ? (
+                                           <p className="text-xs text-slate-500 mt-0.5">งบจัดสรร: {formatCurrency(project.budget)}</p>
+                                        ) : null;
+                                    })()}
+                                 </div>
                                  <span className="text-xs font-semibold px-2 py-1 bg-white border border-slate-200 rounded text-slate-500">
                                    {transactions.filter(t => t.projectId === selectedProjectName).length} รายการ
                                  </span>
@@ -930,9 +931,15 @@ const App: React.FC = () => {
                                        </div>
                                        
                                        <div className="font-bold text-slate-800 mb-1 line-clamp-1" title={t.researcher}>{t.researcher || '(ไม่ระบุ)'}</div>
-                                       <div className="font-mono text-lg font-bold text-indigo-600 mb-3">-{formatCurrency(t.amount)}</div>
-
-                                       <div className="flex items-center justify-between pt-3 border-t border-slate-50">
+                                       <div className="font-mono text-lg font-bold text-indigo-600 mb-1">-{formatCurrency(t.amount)}</div>
+                                       
+                                       {t.adminBudget > 0 && (
+                                          <div className="text-xs text-slate-500 mb-3 bg-slate-50 px-2 py-1 rounded w-fit border border-slate-100">
+                                             งบบริหาร: {formatCurrency(t.adminBudget)}
+                                          </div>
+                                       )}
+                                       
+                                       <div className={`flex items-center justify-between border-t border-slate-50 ${t.adminBudget > 0 ? 'pt-2' : 'pt-3'}`}>
                                           <div className="text-xs text-slate-400 max-w-[120px] truncate">{t.remark || '-'}</div>
                                           <div className="flex gap-2">
                                               <button 

@@ -44,7 +44,6 @@ export interface Project {
   subPlan: string;
   actPlan: string;
   activity: string;
-  duration?: string; // Added duration field
 }
 
 export interface Transaction {
