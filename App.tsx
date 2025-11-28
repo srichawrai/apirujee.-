@@ -34,8 +34,13 @@ import { Project, Transaction, ChatMessage, ColumnInfo, ChartConfig, ChartType }
 // Helper to persist data
 const usePersistedState = <T,>(key: string, initialValue: T): [T, React.Dispatch<React.SetStateAction<T>>] => {
   const [state, setState] = useState<T>(() => {
-    const stored = localStorage.getItem(key);
-    return stored ? JSON.parse(stored) : initialValue;
+    try {
+      const stored = localStorage.getItem(key);
+      return stored ? JSON.parse(stored) : initialValue;
+    } catch (e) {
+      console.error("Storage parse error", e);
+      return initialValue;
+    }
   });
 
   useEffect(() => {
@@ -45,9 +50,25 @@ const usePersistedState = <T,>(key: string, initialValue: T): [T, React.Dispatch
   return [state, setState];
 };
 
+// --- Reusable Components (Defined OUTSIDE App to prevent re-render focus loss) ---
+
+const InputField = ({ label, required, className, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { label: string }) => (
+  <div className="group">
+    <label className="block text-sm font-semibold text-slate-700 mb-1.5 ml-1 transition-colors group-focus-within:text-indigo-600">
+      {label} {required && <span className="text-red-500">*</span>}
+    </label>
+    <input 
+      required={required}
+      {...props}
+      className={`w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition-all duration-200 placeholder:text-slate-400 text-slate-800 ${className}`}
+    />
+  </div>
+);
+
 const App: React.FC = () => {
   // --- State Management ---
   const [activeTab, setActiveTab] = useState<'add' | 'disburse' | 'report' | 'chat'>('add');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   
   // Data
   const [projects, setProjects] = usePersistedState<Project[]>('budget_projects', []);
@@ -55,17 +76,25 @@ const App: React.FC = () => {
 
   // Form State - Add/Edit Project
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
-  const [newProject, setNewProject] = useState<Partial<Project>>({
-    budgetType: 'พ.ร.บ.(เงินอุดหนุน)'
+  // Use 'any' to allow string input for numbers during editing (UX fix)
+  const [newProject, setNewProject] = useState<any>(() => {
+    // Load draft if exists
+    const savedDraft = localStorage.getItem('draft_project');
+    return savedDraft ? JSON.parse(savedDraft) : { budgetType: 'พ.ร.บ.(เงินอุดหนุน)', budget: '' };
   });
   const [projectSearchQuery, setProjectSearchQuery] = useState('');
 
   // Form State - Disbursement
-  const [selectedProjectName, setSelectedProjectName] = useState<string>('');
+  const [selectedProjectName, setSelectedProjectName] = useState<string>(() => {
+    return localStorage.getItem('draft_selected_project') || '';
+  });
   const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null);
-  const [viewingTransaction, setViewingTransaction] = useState<Transaction | null>(null); // State for viewing details
-  const [newTransaction, setNewTransaction] = useState<Partial<Transaction>>({
-    screeningStatus: 'ผ่าน'
+  const [viewingTransaction, setViewingTransaction] = useState<Transaction | null>(null); 
+  // Use 'any' to allow string input for numbers during editing (UX fix)
+  const [newTransaction, setNewTransaction] = useState<any>(() => {
+    // Load draft if exists
+    const savedDraft = localStorage.getItem('draft_transaction');
+    return savedDraft ? JSON.parse(savedDraft) : { screeningStatus: 'ผ่าน', amount: '', adminBudget: '' };
   });
 
   // Chat State
@@ -82,7 +111,21 @@ const App: React.FC = () => {
   // UI State
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
-  // --- Helper Calculations ---
+  // --- Auto-Save Drafts Effects ---
+  useEffect(() => {
+    if (!editingProjectId) { // Only save draft if not editing an existing record
+      localStorage.setItem('draft_project', JSON.stringify(newProject));
+    }
+  }, [newProject, editingProjectId]);
+
+  useEffect(() => {
+    if (!editingTransactionId) { // Only save draft if not editing an existing record
+      localStorage.setItem('draft_transaction', JSON.stringify(newTransaction));
+      localStorage.setItem('draft_selected_project', selectedProjectName);
+    }
+  }, [newTransaction, selectedProjectName, editingTransactionId]);
+
+  // --- Helper Calculations & Memos ---
   const getProjectStats = (pName: string) => {
     const proj = projects.find(p => p.name === pName);
     if (!proj) return null;
@@ -100,12 +143,43 @@ const App: React.FC = () => {
     return new Intl.NumberFormat('th-TH', { style: 'currency', currency: 'THB' }).format(val);
   };
 
+  // Centralized Admin Budget Logic
+  const adminBudgetStats = useMemo(() => {
+    if (!selectedProjectName) return { max: 0, used: 0, remainingQuota: 0, isExceeded: false };
+
+    const project = projects.find(p => p.name === selectedProjectName);
+    if (!project) return { max: 0, used: 0, remainingQuota: 0, isExceeded: false };
+
+    const maxAdminBudget = project.budget * 0.05;
+    
+    // Calculate existing admin budget usage (excluding current transaction if editing)
+    const existingAdminBudget = transactions
+        .filter(t => t.projectId === selectedProjectName && t.id !== editingTransactionId)
+        .reduce((sum, t) => sum + (t.adminBudget || 0), 0);
+        
+    const currentInputAdmin = Number(newTransaction.adminBudget || 0);
+    const totalProjectedAdmin = existingAdminBudget + currentInputAdmin;
+    const remainingQuota = Math.max(0, maxAdminBudget - existingAdminBudget);
+    const isExceeded = totalProjectedAdmin > maxAdminBudget + 0.01; // epsilon for float
+
+    return {
+      max: maxAdminBudget,
+      used: existingAdminBudget,
+      remainingQuota,
+      isExceeded
+    };
+  }, [selectedProjectName, transactions, newTransaction.adminBudget, projects, editingTransactionId]);
+
   // --- Actions ---
 
   const handleAddProject = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+
     if (!newProject.name || !newProject.budget) {
       alert('กรุณาระบุชื่อและงบประมาณโครงการ');
+      setIsSubmitting(false);
       return;
     }
 
@@ -113,48 +187,53 @@ const App: React.FC = () => {
     const isDuplicate = projects.some(p => p.name === newProject.name && p.id !== editingProjectId);
     if (isDuplicate) {
       alert('ชื่อโครงการนี้มีอยู่แล้ว กรุณาใช้ชื่ออื่น');
+      setIsSubmitting(false);
       return;
     }
+
+    // Prepare payload with correct types
+    const payload = {
+        ...newProject,
+        budget: Number(newProject.budget)
+    };
 
     if (editingProjectId) {
       // Update existing project
       const oldProject = projects.find(p => p.id === editingProjectId);
-      
-      // If name changed, update references in transactions
-      if (oldProject && oldProject.name !== newProject.name) {
+      if (oldProject && oldProject.name !== payload.name) {
          const updatedTransactions = transactions.map(t => 
-            t.projectId === oldProject.name ? { ...t, projectId: newProject.name! } : t
+            t.projectId === oldProject.name ? { ...t, projectId: payload.name } : t
          );
          setTransactions(updatedTransactions);
       }
 
       setProjects(projects.map(p => 
-        p.id === editingProjectId ? { ...p, ...newProject, id: p.id } as Project : p
+        p.id === editingProjectId ? { ...p, ...payload, id: p.id } as Project : p
       ));
-      
       setEditingProjectId(null);
-      alert(`อัปเดตข้อมูลโครงการ "${newProject.name}" เรียบร้อยแล้ว!`);
+      alert(`อัปเดตข้อมูลโครงการ "${payload.name}" เรียบร้อยแล้ว!`);
     } else {
       // Add new project
       const project: Project = {
         id: crypto.randomUUID(),
-        name: newProject.name,
-        budget: Number(newProject.budget),
-        division: newProject.division || '',
-        budgetType: newProject.budgetType || 'พ.ร.บ.(เงินอุดหนุน)',
-        strategy: newProject.strategy || '',
-        plan: newProject.plan || '',
-        subPlan: newProject.subPlan || '',
-        actPlan: newProject.actPlan || '',
-        activity: newProject.activity || '',
+        name: payload.name,
+        budget: payload.budget,
+        division: payload.division || '',
+        budgetType: payload.budgetType || 'พ.ร.บ.(เงินอุดหนุน)',
+        strategy: payload.strategy || '',
+        plan: payload.plan || '',
+        subPlan: payload.subPlan || '',
+        actPlan: payload.actPlan || '',
+        activity: payload.activity || '',
       };
-
       setProjects([...projects, project]);
       alert(`บันทึกโครงการ "${project.name}" เรียบร้อยแล้ว!`);
     }
 
-    // Reset form
-    setNewProject({ budgetType: 'พ.ร.บ.(เงินอุดหนุน)' });
+    // Reset and Clear Draft
+    setNewProject({ budgetType: 'พ.ร.บ.(เงินอุดหนุน)', budget: '' });
+    localStorage.removeItem('draft_project');
+    setIsSubmitting(false);
   };
 
   const startEditProject = (project: Project) => {
@@ -164,33 +243,49 @@ const App: React.FC = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const handleDeleteProject = (projectId: string, projectName: string) => {
+    if (window.confirm(`คุณแน่ใจหรือไม่ที่จะลบโครงการ "${projectName}"?\n\nคำเตือน: ข้อมูลการเบิกจ่ายทั้งหมดของโครงการนี้จะถูกลบไปด้วย และไม่สามารถกู้คืนได้`)) {
+        // Remove transactions linked to this project
+        setTransactions(prev => prev.filter(t => t.projectId !== projectName));
+        // Remove the project
+        setProjects(prev => prev.filter(p => p.id !== projectId));
+
+        // If currently editing this project, cancel edit
+        if (editingProjectId === projectId) {
+            cancelEditProject();
+        }
+    }
+  };
+
   const cancelEditProject = () => {
-    setNewProject({ budgetType: 'พ.ร.บ.(เงินอุดหนุน)' });
+    // Restore draft or reset
+    setNewProject({ budgetType: 'พ.ร.บ.(เงินอุดหนุน)', budget: '' });
     setEditingProjectId(null);
   };
 
   const handleAddTransaction = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedProjectName || !newTransaction.amount) return;
+    if (isSubmitting) return;
+    setIsSubmitting(true);
 
-    // --- Admin Budget Validation (Max 5%) ---
-    const project = projects.find(p => p.name === selectedProjectName);
-    if (project) {
-        const maxAdminBudget = project.budget * 0.05;
-        
-        // Calculate existing admin budget usage (excluding current transaction if editing)
-        const existingAdminBudget = transactions
-            .filter(t => t.projectId === selectedProjectName && t.id !== editingTransactionId)
-            .reduce((sum, t) => sum + (t.adminBudget || 0), 0);
-            
-        const currentInputAdmin = Number(newTransaction.adminBudget || 0);
-        
-        if (existingAdminBudget + currentInputAdmin > maxAdminBudget + 0.01) { // Add small epsilon for float comparison
-            alert(`ไม่สามารถบันทึกได้: งบบริหารรวมเกิน 5% ของโครงการ\n\nวงเงิน 5% = ${formatCurrency(maxAdminBudget)}\nใช้ไปแล้ว = ${formatCurrency(existingAdminBudget)}\nยอดที่กรอกได้สูงสุด = ${formatCurrency(Math.max(0, maxAdminBudget - existingAdminBudget))}`);
-            return;
-        }
+    if (!selectedProjectName || !newTransaction.amount) {
+      setIsSubmitting(false);
+      return;
     }
-    // ----------------------------------------
+
+    // --- Validation using Memoized Logic ---
+    if (adminBudgetStats.isExceeded) {
+        alert(`ไม่สามารถบันทึกได้: งบบริหารรวมเกิน 5% ของโครงการ\n\nวงเงิน 5% = ${formatCurrency(adminBudgetStats.max)}\nใช้ไปแล้ว = ${formatCurrency(adminBudgetStats.used)}\nยอดที่กรอกได้สูงสุด = ${formatCurrency(adminBudgetStats.remainingQuota)}`);
+        setIsSubmitting(false);
+        return;
+    }
+    // ---------------------------------------
+
+    const payload = {
+        ...newTransaction,
+        amount: Number(newTransaction.amount),
+        adminBudget: Number(newTransaction.adminBudget || 0)
+    };
 
     if (editingTransactionId) {
       // Update existing transaction
@@ -198,10 +293,8 @@ const App: React.FC = () => {
         t.id === editingTransactionId 
           ? { 
               ...t, 
-              ...newTransaction, 
-              projectId: selectedProjectName, // Ensure linked to current project
-              amount: Number(newTransaction.amount),
-              adminBudget: Number(newTransaction.adminBudget || 0),
+              ...payload, 
+              projectId: selectedProjectName,
             } as Transaction 
           : t
       ));
@@ -212,20 +305,23 @@ const App: React.FC = () => {
       const transaction: Transaction = {
         id: crypto.randomUUID(),
         projectId: selectedProjectName,
-        installment: newTransaction.installment || '',
-        researcher: newTransaction.researcher || '',
-        amount: Number(newTransaction.amount),
-        screeningStatus: newTransaction.screeningStatus || 'ผ่าน',
-        resolution: newTransaction.resolution || '',
-        adminBudget: Number(newTransaction.adminBudget || 0),
-        remark: newTransaction.remark || '',
+        installment: payload.installment || '',
+        researcher: payload.researcher || '',
+        amount: payload.amount,
+        screeningStatus: payload.screeningStatus || 'ผ่าน',
+        resolution: payload.resolution || '',
+        adminBudget: payload.adminBudget,
+        remark: payload.remark || '',
         timestamp: new Date().toISOString(),
       };
       setTransactions([...transactions, transaction]);
       alert('บันทึกรายการเบิกจ่ายเรียบร้อยแล้ว');
     }
 
-    setNewTransaction({ screeningStatus: 'ผ่าน', installment: '', researcher: '', amount: 0, resolution: '', adminBudget: 0, remark: '' });
+    // Reset and Clear Draft
+    setNewTransaction({ screeningStatus: 'ผ่าน', installment: '', researcher: '', amount: '', resolution: '', adminBudget: '', remark: '' });
+    localStorage.removeItem('draft_transaction');
+    setIsSubmitting(false);
   };
 
   const startEditTransaction = (t: Transaction) => {
@@ -234,7 +330,7 @@ const App: React.FC = () => {
   };
 
   const cancelEditTransaction = () => {
-    setNewTransaction({ screeningStatus: 'ผ่าน', installment: '', researcher: '', amount: 0, resolution: '', adminBudget: 0, remark: '' });
+    setNewTransaction({ screeningStatus: 'ผ่าน', installment: '', researcher: '', amount: '', resolution: '', adminBudget: '', remark: '' });
     setEditingTransactionId(null);
   };
 
@@ -258,10 +354,6 @@ const App: React.FC = () => {
     setIsChatting(false);
   };
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatHistory]);
-
   const handleDownloadCSV = () => {
     const filteredProjects = projects.filter(p => {
       const matchesCategory = reportFilter === 'All' || p[reportCategory] === reportFilter;
@@ -283,7 +375,6 @@ const App: React.FC = () => {
       ].join(',');
     });
 
-    // Add BOM for Excel Thai support
     const csvString = '\uFEFF' + [csvHeader.join(','), ...csvRows].join('\n');
     const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -315,7 +406,7 @@ const App: React.FC = () => {
     </button>
   );
 
-  // --- Chart Data Preparation ---
+  // Chart Data
   const chartData = useMemo(() => {
     const data = projects.reduce((acc, curr) => {
       const type = curr.budgetType || 'อื่นๆ';
@@ -336,20 +427,6 @@ const App: React.FC = () => {
     title: 'สรุปงบประมาณตามประเภท',
     description: 'ยอดรวมงบประมาณทั้งหมดแยกตามประเภทงบ (บาท)'
   };
-
-  // Reusable Components
-  const InputField = ({ label, required, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { label: string }) => (
-    <div className="group">
-      <label className="block text-sm font-semibold text-slate-700 mb-1.5 ml-1 transition-colors group-focus-within:text-indigo-600">
-        {label} {required && <span className="text-red-500">*</span>}
-      </label>
-      <input 
-        required={required}
-        {...props}
-        className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition-all duration-200 placeholder:text-slate-400 text-slate-800"
-      />
-    </div>
-  );
 
   return (
     <div className="flex h-screen bg-[#f8fafc] overflow-hidden font-sans text-slate-800">
@@ -483,8 +560,8 @@ const App: React.FC = () => {
                             step="0.01"
                             placeholder="0.00"
                             className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition-all duration-200 font-mono text-slate-800"
-                            value={newProject.budget || ''}
-                            onChange={e => setNewProject({...newProject, budget: Number(e.target.value)})}
+                            value={newProject.budget}
+                            onChange={e => setNewProject({...newProject, budget: e.target.value})}
                           />
                       </div>
                     </div>
@@ -543,21 +620,29 @@ const App: React.FC = () => {
                       <button 
                         type="button" 
                         onClick={cancelEditProject}
-                        className="flex-1 bg-white text-slate-700 border border-slate-200 py-3.5 rounded-xl font-semibold hover:bg-slate-50 hover:border-slate-300 transition-all shadow-sm active:scale-[0.99]"
+                        disabled={isSubmitting}
+                        className="flex-1 bg-white text-slate-700 border border-slate-200 py-3.5 rounded-xl font-semibold hover:bg-slate-50 hover:border-slate-300 transition-all shadow-sm active:scale-[0.99] disabled:opacity-50"
                       >
                         ยกเลิก
                       </button>
                     )}
                     <button 
                       type="submit" 
-                      className={`flex-1 text-white py-3.5 rounded-xl font-semibold transition-all shadow-lg flex items-center justify-center gap-2 active:scale-[0.99] ${
+                      disabled={isSubmitting}
+                      className={`flex-1 text-white py-3.5 rounded-xl font-semibold transition-all shadow-lg flex items-center justify-center gap-2 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed ${
                         editingProjectId 
                           ? 'bg-gradient-to-r from-orange-500 to-amber-600 hover:shadow-orange-200' 
                           : 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-indigo-200'
                       }`}
                     >
-                        {editingProjectId ? <Save size={20} /> : <PlusCircle size={20} />}
-                        {editingProjectId ? 'บันทึกการแก้ไข' : 'บันทึกข้อมูลโครงการ'}
+                        {isSubmitting ? (
+                          <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                        ) : (
+                          <>
+                            {editingProjectId ? <Save size={20} /> : <PlusCircle size={20} />}
+                            {editingProjectId ? 'บันทึกการแก้ไข' : 'บันทึกข้อมูลโครงการ'}
+                          </>
+                        )}
                     </button>
                   </div>
                 </form>
@@ -591,7 +676,7 @@ const App: React.FC = () => {
                         <th className="px-6 py-4 font-semibold text-slate-500">หน่วยงาน</th>
                         <th className="px-6 py-4 font-semibold text-slate-500">ประเภทงบ</th>
                         <th className="px-6 py-4 font-semibold text-slate-500 text-right">งบประมาณ</th>
-                        <th className="px-6 py-4 font-semibold text-slate-500 text-center w-24">จัดการ</th>
+                        <th className="px-6 py-4 font-semibold text-slate-500 text-center w-32">จัดการ</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
@@ -608,18 +693,28 @@ const App: React.FC = () => {
                           </td>
                           <td className="px-6 py-4 text-right font-semibold text-slate-700 font-mono">{formatCurrency(p.budget)}</td>
                           <td className="px-6 py-4 text-center">
-                            <button 
-                              onClick={() => startEditProject(p)}
-                              disabled={editingProjectId === p.id}
-                              className={`p-2 rounded-full transition-all active:scale-90 ${
-                                editingProjectId === p.id 
-                                  ? 'bg-orange-100 text-orange-500 cursor-default' 
-                                  : 'text-slate-400 hover:bg-indigo-50 hover:text-indigo-600'
-                              }`}
-                              title="แก้ไขโครงการ"
-                            >
-                              <Pencil size={16} />
-                            </button>
+                            <div className="flex items-center justify-center gap-2">
+                                <button 
+                                onClick={() => startEditProject(p)}
+                                disabled={editingProjectId === p.id}
+                                className={`p-2 rounded-full transition-all active:scale-90 ${
+                                    editingProjectId === p.id 
+                                    ? 'bg-orange-100 text-orange-500 cursor-default' 
+                                    : 'text-slate-400 hover:bg-indigo-50 hover:text-indigo-600'
+                                }`}
+                                title="แก้ไขโครงการ"
+                                >
+                                <Pencil size={16} />
+                                </button>
+                                <button 
+                                onClick={() => handleDeleteProject(p.id, p.name)}
+                                disabled={editingProjectId === p.id}
+                                className="p-2 rounded-full text-slate-400 hover:bg-red-50 hover:text-red-500 transition-all active:scale-90 disabled:opacity-30"
+                                title="ลบโครงการ"
+                                >
+                                <Trash2 size={16} />
+                                </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -749,14 +844,13 @@ const App: React.FC = () => {
                                   {editingTransactionId ? 'แก้ไขรายการเบิกจ่าย' : 'บันทึกการเบิกจ่าย'}
                                 </h3>
                                 {editingTransactionId && (
-                                  <button onClick={cancelEditTransaction} className="text-sm text-slate-500 hover:text-orange-600 flex items-center gap-1">
+                                  <button onClick={cancelEditTransaction} disabled={isSubmitting} className="text-sm text-slate-500 hover:text-orange-600 flex items-center gap-1">
                                     <X size={16}/> ยกเลิกแก้ไข
                                   </button>
                                 )}
                               </div>
                               {(() => {
                                   const stats = getProjectStats(selectedProjectName);
-                                  const project = projects.find(p => p.name === selectedProjectName);
                                   const currentFormAmount = Number(newTransaction.amount || 0);
 
                                   // If editing, logic is: Remaining + OldAmount - NewAmount
@@ -766,17 +860,6 @@ const App: React.FC = () => {
                                   const effectiveRemaining = stats ? (stats.remaining + (editingTransactionId ? originalAmount : 0)) : 0;
                                   const willOverspend = stats && (effectiveRemaining - currentFormAmount < 0);
                                   
-                                  // --- Admin Budget Calculation ---
-                                  const maxAdminBudget = project ? project.budget * 0.05 : 0;
-                                  const usedAdmin = transactions
-                                    .filter(t => t.projectId === selectedProjectName && t.id !== editingTransactionId)
-                                    .reduce((sum, t) => sum + (t.adminBudget || 0), 0);
-                                  const currentInputAdmin = Number(newTransaction.adminBudget || 0);
-                                  const totalProjectedAdmin = usedAdmin + currentInputAdmin;
-                                  const remainingAdminQuota = Math.max(0, maxAdminBudget - usedAdmin);
-                                  const isAdminExceeded = totalProjectedAdmin > maxAdminBudget + 0.01;
-                                  // --------------------------------
-
                                   return (
                                     <form onSubmit={handleAddTransaction} className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         <div className="md:col-span-2 grid grid-cols-2 gap-6">
@@ -806,7 +889,8 @@ const App: React.FC = () => {
                                             <input type="number" min="0" step="0.01" required 
                                                 className="w-full px-4 py-3 text-lg font-mono bg-indigo-50/50 border border-indigo-100 rounded-xl focus:bg-white focus:ring-2 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition-all text-indigo-900 placeholder:text-indigo-300" 
                                                 placeholder="0.00"
-                                                value={newTransaction.amount || ''} onChange={e => setNewTransaction({...newTransaction, amount: Number(e.target.value)})} 
+                                                value={newTransaction.amount} 
+                                                onChange={e => setNewTransaction({...newTransaction, amount: e.target.value})} 
                                             />
                                         </div>
 
@@ -817,7 +901,7 @@ const App: React.FC = () => {
                                               <label className="block text-sm font-semibold text-slate-700">6. งบบริหาร (กรอกยอด)</label>
                                               <div className="text-[11px] font-medium bg-slate-100 px-2 py-0.5 rounded text-slate-500 flex items-center gap-1">
                                                 <span>โควตา 5%:</span>
-                                                <span className={`${isAdminExceeded ? 'text-red-600 font-bold' : 'text-slate-700'}`}>{formatCurrency(remainingAdminQuota)}</span>
+                                                <span className={`${adminBudgetStats.isExceeded ? 'text-red-600 font-bold' : 'text-slate-700'}`}>{formatCurrency(adminBudgetStats.remainingQuota)}</span>
                                               </div>
                                           </div>
                                           <input 
@@ -825,10 +909,10 @@ const App: React.FC = () => {
                                             min="0"
                                             step="0.01"
                                             placeholder="0.00"
-                                            className={`w-full px-4 py-2.5 bg-slate-50 border rounded-xl focus:bg-white focus:ring-2 outline-none transition-all font-mono ${isAdminExceeded ? 'border-red-300 focus:ring-red-100 focus:border-red-500 text-red-600' : 'border-slate-200 focus:ring-indigo-100 focus:border-indigo-500'}`}
-                                            value={newTransaction.adminBudget || ''} 
-                                            onChange={e => setNewTransaction({...newTransaction, adminBudget: Number(e.target.value)})} />
-                                            {isAdminExceeded && (
+                                            className={`w-full px-4 py-2.5 bg-slate-50 border rounded-xl focus:bg-white focus:ring-2 outline-none transition-all font-mono ${adminBudgetStats.isExceeded ? 'border-red-300 focus:ring-red-100 focus:border-red-500 text-red-600' : 'border-slate-200 focus:ring-indigo-100 focus:border-indigo-500'}`}
+                                            value={newTransaction.adminBudget} 
+                                            onChange={e => setNewTransaction({...newTransaction, adminBudget: e.target.value})} />
+                                            {adminBudgetStats.isExceeded && (
                                                 <p className="text-xs text-red-500 mt-1 ml-1 flex items-center gap-1 font-medium">
                                                     <AlertCircle size={12}/> เกินโควตา 5% ของโครงการ
                                                 </p>
@@ -868,21 +952,27 @@ const App: React.FC = () => {
 
                                         <div className="md:col-span-2 pt-2 flex gap-4">
                                             {editingTransactionId && (
-                                              <button type="button" onClick={cancelEditTransaction} className="flex-1 bg-white border border-slate-200 text-slate-700 py-3.5 rounded-xl hover:bg-slate-50 font-semibold transition-all">
+                                              <button type="button" disabled={isSubmitting} onClick={cancelEditTransaction} className="flex-1 bg-white border border-slate-200 text-slate-700 py-3.5 rounded-xl hover:bg-slate-50 font-semibold transition-all disabled:opacity-50">
                                                 ยกเลิก
                                               </button>
                                             )}
                                             <button 
                                               type="submit"
-                                              disabled={isAdminExceeded} 
+                                              disabled={adminBudgetStats.isExceeded || isSubmitting} 
                                               className={`flex-1 text-white py-3.5 rounded-xl shadow-lg font-semibold flex items-center justify-center gap-2 transition-all active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed ${
                                                 editingTransactionId 
                                                   ? 'bg-gradient-to-r from-orange-500 to-amber-600 hover:shadow-orange-100' 
                                                   : 'bg-gradient-to-r from-emerald-500 to-green-600 hover:shadow-green-100'
                                               }`}
                                             >
-                                                {editingTransactionId ? <Save size={20} /> : <CheckCircle2 size={20} />} 
-                                                {editingTransactionId ? 'บันทึกการแก้ไข' : 'ยืนยันบันทึกรายการ'}
+                                                {isSubmitting ? (
+                                                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                                                ) : (
+                                                  <>
+                                                    {editingTransactionId ? <Save size={20} /> : <CheckCircle2 size={20} />} 
+                                                    {editingTransactionId ? 'บันทึกการแก้ไข' : 'ยืนยันบันทึกรายการ'}
+                                                  </>
+                                                )}
                                             </button>
                                         </div>
                                     </form>
